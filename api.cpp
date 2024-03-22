@@ -1,6 +1,3 @@
-#include <cutlass/numeric_types.h>
-#include "flash.h"
-#include "static_switch.h"
 #include "fa_api.h"
 
 #ifndef M_LOG2E
@@ -18,16 +15,18 @@ void set_params_fprop(Flash_fwd_params &params,
                       const size_t h_k,
                       const size_t d,
                       const size_t d_rounded,
+
                       // device pointers
-                    //   const at::Tensor q,
-                    //   const at::Tensor k,
-                    //   const at::Tensor v,
-                    //   at::Tensor out,
+                     void* q,
+                     void* k,
+                     void* v,
+                     void* qkv,
+                      void *softmax_lse_d,
                       void *cu_seqlens_q_d,
                       void *cu_seqlens_k_d,
                       void *seqused_k,
                       void *p_d,
-                      void *softmax_lse_d,
+
                       float p_dropout,
                       float softmax_scale,
                       int window_size_left,
@@ -38,30 +37,13 @@ void set_params_fprop(Flash_fwd_params &params,
     memset(&params, 0, sizeof(params));
 
     params.is_bf16 = false;
+    params.q_ptr = q;
+    params.k_ptr = k;
+    params.v_ptr = v;
 
-    // Set the pointers and strides.
-    // params.q_ptr = q.data_ptr();
-    // params.k_ptr = k.data_ptr();
-    // params.v_ptr = v.data_ptr();
-
-    // All stride are in elements, not bytes.
-    // params.q_row_stride = q.stride(-3);
-    // params.k_row_stride = k.stride(-3);
-    // params.v_row_stride = v.stride(-3);
-
-    // params.q_head_stride = q.stride(-2);
-    // params.k_head_stride = k.stride(-2);
-    // params.v_head_stride = v.stride(-2);
-
-    // params.o_ptr = out.data_ptr();
-    // params.o_row_stride = out.stride(-3);
-    // params.o_head_stride = out.stride(-2);
+    params.o_ptr = qkv;
 
     if (cu_seqlens_q_d == nullptr) {
-        // params.q_batch_stride = q.stride(0);
-        // params.k_batch_stride = k.stride(0);
-        // params.v_batch_stride = v.stride(0);
-        // params.o_batch_stride = out.stride(0);
         if (seqlenq_ngroups_swapped) {
              params.q_batch_stride *= seqlen_q;
              params.o_batch_stride *= seqlen_q;
@@ -129,6 +111,140 @@ void set_params_fprop(Flash_fwd_params &params,
     #endif
 }
 
-const char* test() {
-    return "Hola desde Flash Attention";
+
+// Find the number of splits that maximizes the occupancy. For example, if we have
+// batch * n_heads = 48 and we have 108 SMs, having 2 splits (efficiency = 0.89) is
+// better than having 3 splits (efficiency = 0.67). However, we also don't want too many
+// splits as that would incur more HBM reads/writes.
+// So we find the best efficiency, then find the smallest number of splits that gets 85%
+// of the best efficiency.
+inline int num_splits_heuristic(int batch_nheads_mblocks, int num_SMs, int num_n_blocks, int max_splits) {
+    // If we have enough to almost fill the SMs, then just use 1 split
+    if (batch_nheads_mblocks >= 0.8f * num_SMs) { return 1; }
+    max_splits = std::min({max_splits, num_SMs, num_n_blocks});
+    float max_efficiency = 0.f;
+    std::vector<float> efficiency;
+    efficiency.reserve(max_splits);
+    auto ceildiv = [](int a, int b) { return (a + b - 1) / b; };
+    // Some splits are not eligible. For example, if we have 64 blocks and choose 11 splits,
+    // we'll have 6 * 10 + 4 blocks. If we choose 12 splits, we'll have 6 * 11 + (-2) blocks
+    // (i.e. it's 11 splits anyway).
+    // So we check if the number of blocks per split is the same as the previous num_splits.
+    auto is_split_eligible = [&ceildiv, &num_n_blocks](int num_splits) {
+        return num_splits == 1 || ceildiv(num_n_blocks, num_splits) != ceildiv(num_n_blocks, num_splits - 1);
+    };
+    for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
+        if (!is_split_eligible(num_splits)) {
+            efficiency.push_back(0.f);
+        } else {
+            float n_waves = float(batch_nheads_mblocks * num_splits) / num_SMs;
+            float eff = n_waves / ceil(n_waves);
+            // printf("num_splits = %d, eff = %f\n", num_splits, eff);
+            if (eff > max_efficiency) { max_efficiency = eff; }
+            efficiency.push_back(eff);
+        }
+    }
+    for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
+        if (!is_split_eligible(num_splits)) { continue; }
+        if (efficiency[num_splits - 1] >= 0.85 * max_efficiency) {
+            // printf("num_splits chosen = %d\n", num_splits);
+            return num_splits;
+        }
+    }
+    return 1;
+}
+
+void set_params_splitkv(Flash_fwd_params &params, const int batch_size,
+    const int num_heads, const int head_size, const int max_seqlen_k, const int max_seqlen_q,
+    const int head_size_rounded, const float p_dropout,
+    const int num_splits) {
+
+    cudaDeviceProp dprops;
+    cudaGetDeviceProperties(&dprops, 0);
+
+    // This needs to match with run_mha_fwd_splitkv_dispatch
+    const int block_n = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
+    const int num_n_blocks = (max_seqlen_k + block_n - 1) / block_n;
+
+    // Technically kBlockM = 64 only for the splitKV kernels, not the standard kernel.
+    // In any case we don't expect seqlen_q to be larger than 64 for inference.
+    const int num_m_blocks = (max_seqlen_q + 64 - 1) / 64;
+    params.num_splits = num_splits;
+    if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
+        if (num_splits < 1) {
+            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, dprops.multiProcessorCount, num_n_blocks, 128);
+            printf("split num_splits: %d\n", params.num_splits);
+        }
+        if (params.num_splits > 1) {
+            // at::Tensor softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
+            // at::Tensor out_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, head_size_rounded}, opts.dtype(at::kFloat));
+            // params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
+            // params.oaccum_ptr = out_accum.data_ptr();
+        }
+        // TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
+    }
+}
+
+void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+    HEADDIM_SWITCH(params.d, [&] {
+        if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+            run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream);
+        } else {
+            run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
+        }
+    });
+}
+
+void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
+    int head_dim, int seqlen_q, int seqlen_k, int num_heads, int num_heads_k, float scale, cudaStream_t stream) {
+
+    const int batch_size = 1;
+
+    auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
+    const int head_size = round_multiple(head_dim, 8);
+    const int head_size_rounded = round_multiple(head_size, 32);
+    const int seqlen_q_rounded = round_multiple(seqlen_q, 128);
+    const int seqlen_k_rounded = round_multiple(seqlen_k, 128);
+
+    Flash_fwd_params params;
+
+    set_params_fprop(params,
+                     batch_size,
+                     seqlen_q, seqlen_k,
+                     seqlen_q_rounded, seqlen_k_rounded,
+                     num_heads, num_heads_k,
+                     head_size, head_size_rounded,
+                     q, k, v, qkv,
+                     softmax_lse,
+                     /*cu_seqlens_q_d=*/nullptr,
+                     /*cu_seqlens_k_d=*/nullptr,
+                     /*seqused_k=*/nullptr,
+                     nullptr,
+                     0.0f,
+                     scale,
+                     -1,
+                     -1);
+
+    set_params_splitkv(params, batch_size, num_heads,
+                       head_size, seqlen_k, seqlen_q,
+                       head_size_rounded, 0.0f, /*num_splits*/0);
+
+    // All stride are in elements, not bytes.
+    params.q_row_stride = num_heads * head_dim;
+    params.k_row_stride = num_heads_k * head_dim;
+    params.v_row_stride = num_heads_k * head_dim;
+
+    params.q_head_stride = head_dim;
+    params.k_head_stride = head_dim;
+    params.v_head_stride = head_dim;
+
+    params.o_row_stride = num_heads * head_dim;
+    params.o_head_stride = head_dim;
+
+    params.q_batch_stride = num_heads * head_dim * seqlen_q;
+    params.k_batch_stride = num_heads_k * head_dim * seqlen_k;
+    params.v_batch_stride = num_heads_k * head_dim * seqlen_k;
+    params.o_batch_stride = num_heads * head_dim * seqlen_q;
+
+    run_mha_fwd(params, stream);
 }

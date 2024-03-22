@@ -34,7 +34,3 @@ cuda_add_library(flash_attn SHARED
     fa/flash_fwd_split_hdim64_fp16_sm80.cu
     fa/flash_fwd_split_hdim128_fp16_sm80.cu
 )
-
-add_executable(cuda-test main.cpp)
-
-target_link_libraries(cuda-test flash_attn)
