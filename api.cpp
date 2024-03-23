@@ -173,7 +173,6 @@ void set_params_splitkv(Flash_fwd_params &params, const int batch_size,
     if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
         if (num_splits < 1) {
             params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, dprops.multiProcessorCount, num_n_blocks, 128);
-            printf("split num_splits: %d\n", params.num_splits);
         }
         if (params.num_splits > 1) {
             // at::Tensor softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
