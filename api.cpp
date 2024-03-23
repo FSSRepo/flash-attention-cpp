@@ -99,10 +99,10 @@ void set_params_fprop(Flash_fwd_params &params,
     params.window_size_left = window_size_left;
     params.window_size_right = window_size_right;
 
-    #ifdef FLASHATTENTION_DISABLE_LOCAL
-        TORCH_CHECK(params.is_causal || (window_size_left < 0 && window_size_right < 0),
-            "This flash attention build does not support local attention.");
-    #endif
+    // #ifdef FLASHATTENTION_DISABLE_LOCAL
+    //     TORCH_CHECK(params.is_causal || (window_size_left < 0 && window_size_right < 0),
+    //         "This flash attention build does not support local attention.");
+    // #endif
 
     params.is_seqlens_k_cumulative = true;
 
@@ -190,15 +190,14 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
         if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
             run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream);
         } else {
-            run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
+            // run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
         }
     });
 }
 
-void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
-    int head_dim, int seqlen_q, int seqlen_k, int num_heads, int num_heads_k, float scale, cudaStream_t stream) {
-
-    const int batch_size = 1;
+void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void* softmax_lse,
+    const int head_dim, const int seqlen_q, const int seqlen_k, const int num_heads, const int num_heads_kv,
+    const int attn_bias_heads, const int batch_size, const float scale, cudaStream_t stream) {
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size = round_multiple(head_dim, 8);
@@ -212,7 +211,7 @@ void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
                      batch_size,
                      seqlen_q, seqlen_k,
                      seqlen_q_rounded, seqlen_k_rounded,
-                     num_heads, num_heads_k,
+                     num_heads, num_heads_kv,
                      head_size, head_size_rounded,
                      q, k, v, qkv,
                      softmax_lse,
@@ -231,8 +230,8 @@ void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
 
     // All stride are in elements, not bytes.
     params.q_row_stride = num_heads * head_dim;
-    params.k_row_stride = num_heads_k * head_dim;
-    params.v_row_stride = num_heads_k * head_dim;
+    params.k_row_stride = num_heads_kv * head_dim;
+    params.v_row_stride = num_heads_kv * head_dim;
 
     params.q_head_stride = head_dim;
     params.k_head_stride = head_dim;
@@ -242,9 +241,24 @@ void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
     params.o_head_stride = head_dim;
 
     params.q_batch_stride = num_heads * head_dim * seqlen_q;
-    params.k_batch_stride = num_heads_k * head_dim * seqlen_k;
-    params.v_batch_stride = num_heads_k * head_dim * seqlen_k;
+    params.k_batch_stride = num_heads_kv * head_dim * seqlen_k;
+    params.v_batch_stride = num_heads_kv * head_dim * seqlen_k;
     params.o_batch_stride = num_heads * head_dim * seqlen_q;
+
+    params.attn_bias_batch_stride = 0;
+    if(attn_bias) {
+        params.attn_bias_ptr =          attn_bias;
+        params.attn_bias_head_stride =  seqlen_k * seqlen_q;
+        params.attn_bias_q_stride =     seqlen_k;
+    } else {
+        params.attn_bias_ptr = attn_bias;
+        params.attn_bias_head_stride = 0;
+        params.attn_bias_q_stride    = 0;
+    }
+
+    if ((attn_bias_heads == 1) && (num_heads != 1)) {
+        params.attn_bias_head_stride = 0;
+    }
 
     run_mha_fwd(params, stream);
 }

@@ -16,12 +16,7 @@
 #define EXPORT
 #endif
 
-
-#if defined(_WIN32)
-EXPORT void fa_forward(void* q, void* k, void* v, void* qkv, void* softmax_lse,
-    int head_dim, int seqlen_q, int seqlen_k, int num_heads, int num_heads_k, float scale, cudaStream_t stream);
-
-#else
-// EXPORT const char* test();
-#endif
+EXPORT void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void* softmax_lse,
+    const int head_dim, const int seqlen_q, const int seqlen_k, const int num_heads, const int num_heads_kv,
+    const int attn_bias_heads, const int batch_size, const float scale, cudaStream_t stream);
 #endif

@@ -56,6 +56,16 @@
   #define EVENK_SWITCH BOOL_SWITCH
 #endif
 
+#ifdef FLASHATTENTION_DISABLE_ATTN_BIAS
+  #define ATTN_BIAS_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                         \
+    constexpr static bool CONST_NAME = false;   \
+    return __VA_ARGS__();                       \
+  }()
+#else
+  #define ATTN_BIAS_SWITCH BOOL_SWITCH
+#endif
+
 #ifdef FLASHATTENTION_DISABLE_LOCAL
   #define LOCAL_SWITCH(COND, CONST_NAME, ...)   \
   [&] {                                         \
@@ -68,8 +78,11 @@
 
 #define HEADDIM_SWITCH(HEADDIM, ...)   \
   [&] {                                    \
-    if (HEADDIM <= 64) {            \
+    if (HEADDIM <= 64) {                   \
       constexpr static int kHeadDim = 64;  \
+      return __VA_ARGS__();                \
+    } else if (HEADDIM <= 96) {            \
+      constexpr static int kHeadDim = 96;  \
       return __VA_ARGS__();                \
     } else if (HEADDIM <= 128) {           \
       constexpr static int kHeadDim = 128; \
