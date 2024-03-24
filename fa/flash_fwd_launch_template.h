@@ -212,7 +212,7 @@ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 128;
     cudaDeviceProp dprops;
     cudaGetDeviceProperties(&dprops, 0);
-    bool is_sm8x = dprops.major == 8 && dprops.minor > 0;
+    bool is_sm8x = dprops.major == 8 && dprops.minor == 0;
     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
             if constexpr(!Is_dropout) {

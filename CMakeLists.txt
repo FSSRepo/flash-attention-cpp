@@ -31,8 +31,8 @@ include_directories(
 
 cuda_add_library(flash_attn SHARED
     api.cpp
-    fa/flash_fwd_hdim64_fp16_sm80.cu
-    fa/flash_fwd_hdim96_fp16_sm80.cu
+    # fa/flash_fwd_hdim64_fp16_sm80.cu
+    # fa/flash_fwd_hdim96_fp16_sm80.cu
     fa/flash_fwd_hdim128_fp16_sm80.cu
     # fa/flash_fwd_split_hdim64_fp16_sm80.cu
     # fa/flash_fwd_split_hdim128_fp16_sm80.cu
