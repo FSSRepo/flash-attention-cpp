@@ -90,10 +90,6 @@ void set_params_fprop(Flash_fwd_params &params,
     params.rp_dropout = 1.f / params.p_dropout;
     params.scale_softmax_rp_dropout = params.rp_dropout * params.scale_softmax;
 
-    #ifdef FLASHATTENTION_DISABLE_DROPOUT
-        TORCH_CHECK(p_dropout == 0.0f, "This flash attention build does not support dropout.");
-    #endif
-
     // Causal is the special case where window_size_right == 0 and window_size_left < 0.
     // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
     params.is_causal = window_size_left < 0 && window_size_right == 0;
@@ -109,10 +105,6 @@ void set_params_fprop(Flash_fwd_params &params,
     // #endif
 
     params.is_seqlens_k_cumulative = true;
-
-    #ifdef FLASHATTENTION_DISABLE_UNEVEN_K
-        TORCH_CHECK(d == d_rounded, "This flash attention build does not support headdim not being a multiple of 32.");
-    #endif
 }
 
 
@@ -178,12 +170,6 @@ void set_params_splitkv(Flash_fwd_params &params, const int batch_size,
         if (num_splits < 1) {
             params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, dprops.multiProcessorCount, num_n_blocks, 128);
         }
-        if (params.num_splits > 1) {
-            // at::Tensor softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
-            // at::Tensor out_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q, head_size_rounded}, opts.dtype(at::kFloat));
-            // params.softmax_lseaccum_ptr = softmax_lse_accum.data_ptr();
-            // params.oaccum_ptr = out_accum.data_ptr();
-        }
         // TORCH_CHECK(params.num_splits <= 128, "num_splits > 128 not supported");
     }
 }
@@ -193,7 +179,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
         if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
             run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream);
         } else {
-            // run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
+            run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
         }
     });
 }
@@ -229,7 +215,12 @@ void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void*
 
     set_params_splitkv(params, batch_size, num_heads,
                        head_size, seqlen_k, seqlen_q,
-                       head_size_rounded, 0.0f, /*num_splits*/0);
+                       head_size_rounded, 0.0f, /*num_splits*/2);
+    
+    if (params.num_splits > 1) {
+        cudaMallocAsync(&params.softmax_lseaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_k * sizeof(float), stream);
+        cudaMallocAsync(&params.oaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_q * head_size_rounded * sizeof(float), stream);
+    }
 
     // All stride are in elements, not bytes.
     params.q_row_stride = num_heads * head_dim;
@@ -264,4 +255,9 @@ void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void*
     }
 
     run_mha_fwd(params, stream);
+
+    if (params.num_splits > 1) {
+        cudaFreeAsync(&params.softmax_lseaccum_ptr, stream);
+        cudaFreeAsync(&params.oaccum_ptr, stream);
+    }
 }
