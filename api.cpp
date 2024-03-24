@@ -1,3 +1,7 @@
+#include <cuda_runtime.h>
+#if !defined(_WIN32)
+#include <stddef.h>
+#endif
 #include "fa_api.h"
 
 #ifndef M_LOG2E

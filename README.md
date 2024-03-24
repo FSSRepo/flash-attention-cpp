@@ -1,1 +1,1 @@
-You need to clone cutlass repository to build this
+You need to execute `get-cutlass.sh` to build this.

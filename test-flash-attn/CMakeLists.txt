@@ -2,17 +2,15 @@ cmake_minimum_required(VERSION 3.18)
 
 project(TestApp)
 
-if (WIN32)
-  find_package(CUDAToolkit REQUIRED)
-  enable_language(CUDA)
-  set(CUDA_FLAGS -use_fast_math)
-  set(CUDA_FILES main.cu)
-  set(CUDA_LIBRARIES CUDA::cudart_static)
+find_package(CUDAToolkit REQUIRED)
+enable_language(CUDA)
+set(CUDA_FLAGS -use_fast_math)
+set(CUDA_FILES main.cu)
+set(CUDA_LIBRARIES CUDA::cudart_static)
 
-  set(CMAKE_CUDA_ARCHITECTURES "70")
+set(CMAKE_CUDA_ARCHITECTURES "70")
 
-  add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
-endif()
+add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>")
 
 message(STATUS "Using CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
