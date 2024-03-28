@@ -180,6 +180,7 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
             run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream);
         } else {
             run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
+            printf("running split kv kernel\n");
         }
     });
 }
@@ -218,8 +219,8 @@ void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void*
                        head_size_rounded, 0.0f, /*num_splits*/2);
     
     if (params.num_splits > 1) {
-        cudaMallocAsync(&params.softmax_lseaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_k * sizeof(float), stream);
-        cudaMallocAsync(&params.oaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_q * head_size_rounded * sizeof(float), stream);
+        cudaMallocAsync((void**)&params.softmax_lseaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_k * sizeof(float), stream);
+        cudaMallocAsync((void**)&params.oaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_q * head_size_rounded * sizeof(float), stream);
     }
 
     // All stride are in elements, not bytes.
@@ -257,7 +258,7 @@ void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void*
     run_mha_fwd(params, stream);
 
     if (params.num_splits > 1) {
-        cudaFreeAsync(&params.softmax_lseaccum_ptr, stream);
-        cudaFreeAsync(&params.oaccum_ptr, stream);
+        cudaFreeAsync(params.softmax_lseaccum_ptr, stream);
+        cudaFreeAsync(params.oaccum_ptr, stream);
     }
 }

@@ -4,7 +4,7 @@ project(TestApp)
 
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
-set(CUDA_FLAGS -use_fast_math)
+set(CUDA_FLAGS -use_fast_math -lineinfo)
 set(CUDA_FILES main.cu)
 set(CUDA_LIBRARIES CUDA::cudart_static)
 

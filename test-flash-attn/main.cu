@@ -164,7 +164,7 @@ void cap_test() {
 
             const size_t shmem_f_ = nqpb*(head_dim + nwarps*(ncpw + nqpb))*(sizeof(float)/2);
 
-            flash_attn_ext_f16<128, nqpb, ncpw><<<blocks_num, block_dim, shmem_f_, stream>>>(
+            flash_attn_ext_f16<64, nqpb, ncpw><<<blocks_num, block_dim, shmem_f_, stream>>>(
                 (const char*)d_query_f32, (const char*)d_key, (const char*)d_value, (const char*)d_mask, d_qkv_f32, scale,
                 head_dim, batch_size, num_heads, 1, // query
                 head_dim, kv_size, num_kv_heads, 1, // key value
@@ -269,7 +269,7 @@ void real_test() {
     tensor* tensor_mask =           load_tensor_from_file("C:\\proyectos\\kernel-data\\tg\\mask-256.tensor");
     tensor* tensor_qkv_ref =        load_tensor_from_file("C:\\proyectos\\kernel-data\\tg\\qkv-256.tensor");
 
-    int head_dim = 128, batch_size = 1, num_heads = 32, kv_size = 256, num_kv_heads = 32;
+    int head_dim = 64, batch_size = 1, num_heads = 32, kv_size = 256, num_kv_heads = 32;
     const int r_kv_heads = num_heads / num_kv_heads;
 
     float scale = 1.0f / sqrtf((float)head_dim);

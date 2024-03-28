@@ -867,6 +867,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
     flash::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV,
                                        binfo.actual_seqlen_k - n_block * kBlockN);
+    if (Has_attn_bias) {
+        cute::copy(gmem_tiled_copy_B, tBgB, tBsB);
+    }
     cute::cp_async_fence();
 
     // flash::cp_async_wait<0>();
@@ -879,7 +882,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     flash::Softmax<2 * size<1>(acc_o)> softmax;
 
     const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
-    flash::Mask<Is_causal, Is_local, Has_alibi, false> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
+    flash::Mask<Is_causal, Is_local, Has_alibi, Has_attn_bias> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, params.scale_softmax, alibi_slope);
 
     // For performance reason, we separate out two kinds of iterations:
     // those that need masking on S, and those that don't.
@@ -917,6 +920,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
             );
         }
+
+        if (Has_attn_bias) {
+            cute::copy(smem_tiled_copy_B, tSsB, tBrB_copy_view);
+        }
+
         cute::cp_async_fence();
 
         flash::gemm(
@@ -945,6 +953,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 const int block_table_offset_next =(n_block - 1) * kBlockN - block_table_idx_next * params.page_block_size;
                 tKgK.data() = tKgK.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.k_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.k_row_stride;
             }
+
+            //Advance gB
+            if (Has_attn_bias) {
+                tBgB.data() = tBgB.data() + (-kBlockN);
+                cute::copy(gmem_tiled_copy_B, tBgB, tBsB);
+            }
+
             flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
             // isn't right and we get race conditions.
@@ -953,8 +968,8 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
         // We have key_padding_mask so we'll need to Check_inf
         masking_step == 0
-            ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2)
-            : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2);
+            ? softmax.template softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Has_attn_bias || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2)
+            : softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Has_attn_bias || Is_local || !Is_even_MN>(acc_s, acc_o, params.scale_softmax_log2);
         // if (cute::thread0()) { print(scores_max); print(scores_sum); print(scores); }
 
         // Convert acc_s from fp32 to fp16/bf16
@@ -989,6 +1004,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             tVgV.data() = tVgV.data() + (block_table[block_table_idx_next] - block_table[block_table_idx_cur]) * params.v_batch_stride + (block_table_offset_next - block_table_offset_cur) * params.v_row_stride;
         }
         flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV);
+        
+        if (Has_attn_bias) {
+            cute::copy(smem_tiled_copy_B, tSsB, tBrB_copy_view);
+        }
+        
         cute::cp_async_fence();
 
         flash::gemm(
@@ -1015,10 +1035,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             cute::cp_async_fence();
         }
 
+        //Advance gB
+        if (Has_attn_bias) {
+            tBgB.data() = tBgB.data() + (-kBlockN);
+            cute::copy(gmem_tiled_copy_B, tBgB, tBsB);
+            cute::cp_async_fence();
+        }
+
         mask.template apply_mask</*Causal_mask=*/false>(
             acc_s, tBrB, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
         );
-        softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(acc_s, acc_o, params.scale_softmax_log2);
+        softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local || Has_attn_bias>(acc_s, acc_o, params.scale_softmax_log2);
 
         Tensor rP = flash::convert_type<Element>(acc_s);
         // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
