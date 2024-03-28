@@ -180,7 +180,6 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
             run_mha_fwd_<cutlass::half_t, kHeadDim>(params, stream);
         } else {
             run_mha_fwd_splitkv_dispatch<cutlass::half_t, kHeadDim>(params, stream);
-            printf("running split kv kernel\n");
         }
     });
 }
@@ -216,7 +215,7 @@ void flash_attn_fwd(void* q, void* k, void* v, void* attn_bias, void* qkv, void*
 
     set_params_splitkv(params, batch_size, num_heads,
                        head_size, seqlen_k, seqlen_q,
-                       head_size_rounded, 0.0f, /*num_splits*/2);
+                       head_size_rounded, 0.0f, /*num_splits*/0);
     
     if (params.num_splits > 1) {
         cudaMallocAsync((void**)&params.softmax_lseaccum_ptr, params.num_splits * batch_size * num_heads * seqlen_k * sizeof(float), stream);
