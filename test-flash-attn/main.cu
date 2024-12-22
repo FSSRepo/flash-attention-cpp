@@ -164,7 +164,7 @@ void cap_test() {
 
             const size_t shmem_f_ = nqpb*(head_dim + nwarps*(ncpw + nqpb))*(sizeof(float)/2);
 
-            flash_attn_ext_f16<64, nqpb, ncpw><<<blocks_num, block_dim, shmem_f_, stream>>>(
+            flash_attn_ext_f16<128, nqpb, ncpw><<<blocks_num, block_dim, shmem_f_, stream>>>(
                 (const char*)d_query_f32, (const char*)d_key, (const char*)d_value, (const char*)d_mask, d_qkv_f32, scale,
                 head_dim, batch_size, num_heads, 1, // query
                 head_dim, kv_size, num_kv_heads, 1, // key value

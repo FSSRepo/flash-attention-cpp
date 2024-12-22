@@ -55,7 +55,6 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                             // printf("IsEvenMNConst = %d, IsEvenKConst = %d, Is_local = %d, Is_causal = %d, ReturnSoftmaxConst = %d, Is_dropout = %d\n", int(IsEvenMNConst), int(IsEvenKConst), int(Is_local), int(Is_causal), int(ReturnSoftmaxConst), int(Is_dropout));
                             // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, true, true, false>;
                             if (smem_size >= 48 * 1024) {
-                                printf("no split shared memory: %.4f KB\n", smem_size / 1024.0f);
                                 cudaFuncSetAttribute(
                                     kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
                             }
@@ -97,7 +96,6 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                     // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, true, Split, Append_KV>;
                                     // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, IsEvenKConst>;
                                     if (smem_size >= 48 * 1024) {
-                                        printf("split shared memory: %.4f KB\n", smem_size / 1024.0f);
                                         cudaFuncSetAttribute(
                                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
                                     }
